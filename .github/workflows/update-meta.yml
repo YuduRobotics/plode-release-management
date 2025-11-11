@@ -18,28 +18,34 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Detect changed files
+      - name: Detect changed files (ignore workflow files)
         run: |
-          git diff --name-only HEAD~1 HEAD > changed.txt
+          git diff --name-only HEAD~1 HEAD \
+            | grep -v '^\.github/workflows/' \
+            > changed.txt
 
       - name: Ensure meta.yaml exists
         run: |
           if [ ! -f meta.yaml ]; then
-            echo "version: 0" > meta.yaml
+            echo "version: 0.0.0" > meta.yaml
             echo "last_updated: \"$(date -u +'%Y-%m-%dT%H:%M:%SZ')\"" >> meta.yaml
             echo "changed_files: []" >> meta.yaml
           fi
 
-      - name: Read & increment version
+      - name: Read & increment version (SemVer)
         id: version
         run: |
-          # Read existing version from meta.yaml
           old_version=$(grep 'version:' meta.yaml | awk '{print $2}')
-          if [ -z "$old_version" ]; then old_version=0; fi
-          new_version=$((old_version + 1))
+          if [ -z "$old_version" ]; then old_version="0.0.0"; fi
 
-          echo "old_version=$old_version"
-          echo "new_version=$new_version"
+          IFS='.' read -r major minor patch <<< "$old_version"
+          patch=$((patch + 1))
+          new_version="$major.$minor.$patch"
+
+          # If no real file changed, skip bumping version
+          if [ ! -s changed.txt ]; then
+            new_version="$old_version"
+          fi
 
           echo "new_version=$new_version" >> $GITHUB_OUTPUT
 
@@ -57,7 +63,7 @@ jobs:
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add meta.yaml
-          git commit -m "Auto-increment version to ${{ steps.version.outputs.new_version }} [skip ci]" || echo "No changes"
+          git commit -m "Auto-update meta.yaml to version ${{ steps.version.outputs.new_version }} [skip ci]" || echo "No changes"
 
       - name: Push changes
         uses: ad-m/github-push-action@v0.8.0
