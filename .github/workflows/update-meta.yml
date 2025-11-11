@@ -22,72 +22,84 @@ jobs:
       - name: Install jq & yq
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq
-          pip install yq
+          sudo apt-get install -y jq python3-pip
+          pip3 install yq
 
       - name: Detect changed firmware folder
         id: detect
         run: |
-          # Detect changed files in folders starting with "ZG"
-          changed=$(git diff --name-only HEAD~1 HEAD | grep -E '^ZG[0-9]+\.[0-9]+' || true)
+          echo "Searching for changes inside ZG folders..."
+
+          changed=$(git diff --name-only HEAD~1 HEAD | grep -E '^ZG[0-9]+\.[0-9]+/' || true)
 
           if [ -z "$changed" ]; then
+            echo "No firmware changes detected."
             echo "changed_folder=" >> $GITHUB_OUTPUT
             exit 0
           fi
 
+          # ZG3.1/actions/action.bin → extract "ZG3.1"
           folder=$(echo "$changed" | head -n1 | cut -d'/' -f1)
 
-          # Validate folder exists
           if [ ! -d "$folder" ]; then
-            echo "ERROR: Folder '$folder' does not exist in repo."
+            echo "ERROR: Folder '$folder' does not exist!"
             exit 1
           fi
 
-          echo "changed_folder=$folder" >> $GITHUB_OUTPUT
           echo "Detected firmware folder: $folder"
+          echo "changed_folder=$folder" >> $GITHUB_OUTPUT
 
-
-      - name: Exit if nothing changed
+      - name: Stop if nothing to release
         if: steps.detect.outputs.changed_folder == ''
-        run: echo "No firmware folder changed."
+        run: echo "No firmware updates."
 
-      - name: Set paths
+      - name: Set folder paths
         id: paths
         run: |
           folder="${{ steps.detect.outputs.changed_folder }}"
           meta="${folder}/meta.yaml"
+
           echo "folder=$folder" >> $GITHUB_OUTPUT
           echo "meta=$meta" >> $GITHUB_OUTPUT
 
       - name: Ensure meta.yaml exists
         run: |
-          if [ ! -f "${{ steps.paths.outputs.meta }}" ]; then
-            echo "firmware: \"${{ steps.detect.outputs.changed_folder }}\"" > "${{ steps.paths.outputs.meta }}"
-            echo "version: \"0.0.0\"" >> "${{ steps.paths.outputs.meta }}"
-            echo "last_updated: \"$(date -u +'%Y-%m-%dT%H:%M:%SZ')\"" >> "${{ steps.paths.outputs.meta }}"
-            echo "files: {}" >> "${{ steps.paths.outputs.meta }}"
+          meta="${{ steps.paths.outputs.meta }}"
+          folder="${{ steps.paths.outputs.folder }}"
+
+          if [ ! -f "$meta" ]; then
+            echo "Creating new meta.yaml for $folder ..."
+            {
+              echo "firmware: \"$folder\""
+              echo "version: \"0.0.0\""
+              echo "last_updated: \"$(date -u +'%Y-%m-%dT%H:%M:%SZ')\""
+              echo "files: {}"
+            } > "$meta"
           fi
 
       - name: Increment firmware version
         id: version
         run: |
           meta="${{ steps.paths.outputs.meta }}"
-          old_version=$(yq e '.version' "$meta")
-          IFS='.' read -r major minor patch <<< "$old_version"
-          patch=$((patch+1))
-          new_version="$major.$minor.$patch"
-          echo "new_version=$new_version" >> $GITHUB_OUTPUT
+          old=$(yq e '.version' "$meta")
+
+          IFS='.' read -r major minor patch <<< "$old"
+          patch=$((patch + 1))
+          new="$major.$minor.$patch"
+
+          echo "Old version: $old"
+          echo "New version: $new"
+
+          echo "new_version=$new" >> $GITHUB_OUTPUT
 
       - name: Update per-file versions
         run: |
           folder="${{ steps.paths.outputs.folder }}"
           meta="${{ steps.paths.outputs.meta }}"
 
-          # Convert current file entries to JSON
+          # Convert YAML to JSON
           yq e '.files' "$meta" | yq -o=json > files.json
 
-          # Detect changed files inside THIS firmware folder
           git diff --name-only HEAD~1 HEAD \
             | grep "^$folder/" \
             | cut -d'/' -f2- \
@@ -96,22 +108,20 @@ jobs:
           while read file; do
             [ -z "$file" ] && continue
 
-            # If file already tracked → increment patch
             if jq -e ".\"$file\"" files.json > /dev/null 2>&1; then
               old=$(jq -r ".\"$file\".version" files.json)
               IFS='.' read -r a b c <<< "$old"
               c=$((c+1))
               new="$a.$b.$c"
             else
-              new="0.0.1"  # New file
+              new="0.0.1"
             fi
 
-            jq ".\"$file\" = {version:\"$new\", last_updated:\"$(date -u +'%Y-%m-%dT%H:%M:%SZ')\"}" \
+            jq ".\"$file\"={version:\"$new\", last_updated:\"$(date -u +'%Y-%m-%dT%H:%M:%SZ')\"}" \
               files.json > tmp.json && mv tmp.json files.json
 
           done < changed_files.txt
 
-          # Rebuild the meta.yaml
           {
             echo "firmware: \"${{ steps.detect.outputs.changed_folder }}\""
             echo "version: \"${{ steps.version.outputs.new_version }}\""
@@ -119,37 +129,39 @@ jobs:
             echo "files:"
             jq -r 'to_entries | .[] | 
               "  \(.key):\n    version: \"\(.value.version)\"\n    last_updated: \"\(.value.last_updated)\""'
-          } < files.json > "$meta"
+          } > "$meta"
 
       - name: Commit updated meta.yaml
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add "${{ steps.paths.outputs.meta }}"
-          git commit -m "Update ${{ steps.detect.outputs.changed_folder }} firmware to v${{ steps.version.outputs.new_version }} [skip ci]" || echo "No changes"
+          git commit -m "Update ${{ steps.detect.outputs.changed_folder }} to v${{ steps.version.outputs.new_version }} [skip ci]" || echo "No changes"
           git push
 
       - name: Create Release Tags
-        id: tag
+        id: tags
         run: |
           fw="${{ steps.detect.outputs.changed_folder }}"
           ver="${{ steps.version.outputs.new_version }}"
-          tag="${fw}-v${ver}"
 
+          tag="${fw}-v${ver}"
+          latest="${fw}-latest"
+
+          echo "Creating tag: $tag"
           git tag "$tag"
           git push origin "$tag"
 
-          # Update latest tag
-          latest="${fw}-latest"
+          echo "Updating latest tag: $latest"
           git tag -f "$latest"
           git push origin -f "$latest"
 
           echo "tag_name=$tag" >> $GITHUB_OUTPUT
 
-      - name: Create Release
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.tag.outputs.tag_name }}
+          tag_name: ${{ steps.tags.outputs.tag_name }}
           name: "Firmware ${{ steps.detect.outputs.changed_folder }} v${{ steps.version.outputs.new_version }}"
           files: |
             ${{ steps.paths.outputs.folder }}/**
