@@ -1,0 +1,46 @@
+name: DEBUG Firmware Detection
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Print changed files
+        run: |
+          echo "=== RAW CHANGED FILES ==="
+          git diff --name-only HEAD~1 HEAD || true
+          echo "=========================="
+
+      - name: Print ZG detected lines
+        run: |
+          echo "=== FILTERED ZG FILES ==="
+          git diff --name-only HEAD~1 HEAD | grep '^ZG' || echo "NO MATCH"
+          echo "=========================="
+
+      - name: Extract folder logic test
+        run: |
+          changed=$(git diff --name-only HEAD~1 HEAD | grep '^ZG' || true)
+          echo "changed=$changed"
+
+          folder=$(echo "$changed" | head -n1 | cut -d'/' -f1)
+          echo "Detected folder: '$folder' (should NOT be empty)"
+
+      - name: Verify folder exists
+        run: |
+          folder=$(git diff --name-only HEAD~1 HEAD | grep '^ZG' | head -n1 | cut -d'/' -f1)
+          echo "Folder to test: '$folder'"
+
+          if [ -d "$folder" ]; then 
+            echo "✅ Folder exists"
+          else
+            echo "❌ Folder DOES NOT EXIST"
+          fi
