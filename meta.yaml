@@ -1,4 +1,4 @@
-version: 1762855023
-last_updated: "2025-11-11T09:57:03Z"
+version: 1762855024
+last_updated: "2025-11-11T09:59:02Z"
 changed_files:
-  - swd-debugger
+  - .github/workflows/update-meta.yml
