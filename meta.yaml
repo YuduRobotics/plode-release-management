@@ -2,3 +2,6 @@ files:
   swd-debugger:
     version: "0.0.1"
     last_updated: "2025-11-11T10:05:43Z"
+  gmake:
+    version: "0.0.1"
+    last_updated: "2025-11-11T10:07:23Z"
