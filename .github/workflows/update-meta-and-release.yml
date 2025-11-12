@@ -5,7 +5,7 @@ on:
     branches:
       - main
     paths:
-      - '**/*'
+      - "**/*"
 
 permissions:
   contents: write
@@ -24,44 +24,50 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          python-version: "3.x"
 
       - name: Install dependencies
         run: pip install pyyaml
 
-      - name: Detect changed firmware folders
+      - name: Detect changed firmware folders and files
         id: detect
         run: |
-          echo "Detecting changed firmware folders..."
-          # Detect all added, modified, or deleted files
+          echo "Detecting changed firmware folders and files..."
           git diff --name-status HEAD~1 HEAD > changed_files.txt
           cat changed_files.txt || true
 
           > firmware_folders.txt
+          > added_files.txt
+          > deleted_files.txt
+
           while read status path; do
             top=$(echo "$path" | cut -d'/' -f1)
-            # Skip hidden/system folders
             if [[ "$top" == .* ]]; then
               continue
             fi
 
-            # If folder still exists, include it
+            if [ "$status" = "D" ]; then
+              echo "$path" >> deleted_files.txt
+            else
+              echo "$path" >> added_files.txt
+            fi
+
             if [ -d "$top" ]; then
               echo "$top" >> firmware_folders.txt
-            else
-              # Folder deleted completely: mark for release cleanup later
-              echo "deleted:$top" >> firmware_folders.txt
             fi
           done < changed_files.txt
 
           sort -u firmware_folders.txt -o firmware_folders.txt
+
           echo "Detected firmware folders:"
           cat firmware_folders.txt || true
+          echo "Added/modified files:"
+          cat added_files.txt || true
+          echo "Deleted files:"
+          cat deleted_files.txt || true
 
-          folders=$(grep -v '^deleted:' firmware_folders.txt | tr '\n' ' ')
-          deleted=$(grep '^deleted:' firmware_folders.txt | cut -d':' -f2 | tr '\n' ' ')
+          folders=$(cat firmware_folders.txt | tr '\n' ' ')
           echo "folders=$folders" >> $GITHUB_OUTPUT
-          echo "deleted=$deleted" >> $GITHUB_OUTPUT
 
       - name: Update meta.yaml files
         if: steps.detect.outputs.folders != ''
@@ -121,6 +127,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FOLDERS: ${{ steps.detect.outputs.folders }}
         run: |
+          echo "Preparing release assets..."
+          cat added_files.txt || true
+
           for folder in $FOLDERS; do
             if [ ! -d "$folder" ]; then
               echo "Skipping release for $folder (folder deleted)"
@@ -130,34 +139,19 @@ jobs:
             version=$(grep 'version:' "$folder/meta.yaml" | awk '{print $2}')
             tag="${folder}-v${version}"
 
-            files=$(find "$folder" -type f \( -name "*.bin" -o -name "*.mp3" -o -name "meta.yaml" \))
+            files=$(grep "^${folder}/" added_files.txt || true)
             if [ -z "$files" ]; then
-              echo "No files found to attach for $folder"
-              continue
+              echo "No new or modified files detected in $folder, using only meta.yaml"
+              files="$folder/meta.yaml"
+            else
+              files="$files $folder/meta.yaml"
             fi
 
             echo "Creating or updating release for $folder (tag: $tag)"
             gh release create "$tag" $files \
-              --title "$folder Firmware v${version}" \
+              --title "$folder v${version}" \
               --notes "Automated firmware release for $folder (v${version})." \
               --target main \
               --latest \
-              || gh release edit "$tag" --title "$folder Firmware v${version}" --notes "Updated firmware release."
-          done
-
-      - name: Delete releases for removed firmware folders
-        if: steps.detect.outputs.deleted != ''
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DELETED: ${{ steps.detect.outputs.deleted }}
-        run: |
-          for folder in $DELETED; do
-            echo "Deleting release(s) for removed firmware folder: $folder"
-            tags=$(gh release list --limit 1000 --json tagName --jq '.[] | .tagName' | grep "^${folder}-v" || true)
-            for tag in $tags; do
-              echo "Removing release and tag: $tag"
-              gh release delete "$tag" --yes || true
-              git tag -d "$tag" || true
-              git push origin :refs/tags/"$tag" || true
-            done
+              || gh release edit "$tag" --notes "Updated firmware release for $folder (v${version})."
           done
