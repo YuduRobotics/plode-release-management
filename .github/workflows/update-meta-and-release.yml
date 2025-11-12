@@ -201,20 +201,3 @@ jobs:
             changelog="Added:\n${added}\n\nModified:\n${modified}\n\nDeleted:\n${deleted}"
             gh release edit "$tag" --notes "Automated firmware release for $folder (v${version})." || true
           done
-
-      - name: Delete releases for removed firmware folders
-        if: steps.detect.outputs.deleted != ''
-        env:
-          DELETED: ${{ steps.detect.outputs.deleted }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          for folder in $DELETED; do
-            [ -z "$folder" ] && continue
-            tags=$(gh release list --limit 1000 --json tagName --jq '.[] | .tagName' | grep "^${folder}-v" || true)
-            for tag in $tags; do
-              echo "Deleting release and tag: $tag"
-              gh release delete "$tag" --yes || true
-              git tag -d "$tag" || true
-              git push origin :refs/tags/"$tag" || true
-            done
-          done
