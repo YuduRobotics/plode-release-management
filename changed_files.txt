@@ -1,1 +1,4 @@
-M	.github/workflows/update-meta-and-release.yml
+A	added_files.txt
+A	changed_files.txt
+A	deleted_files.txt
+A	firmware_folders.txt
