@@ -165,53 +165,56 @@ jobs:
           FOLDERS: ${{ steps.detect.outputs.folders }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Starting release creation/update..."
-
-          # get changed firmware files (ignore meta.yaml itself)
-          git diff --name-only HEAD~1 HEAD > /tmp/changed_files.txt || true
-
           for folder in $FOLDERS; do
             [ ! -d "$folder" ] && continue
 
-            # detect changed files for this firmware
-            changed_files=$(grep "^${folder}/" /tmp/changed_files.txt | grep -v "meta.yaml" || true)
-            meta_path="${folder}/meta.yaml"
-            version=$(grep '^version:' "$meta_path" | awk '{print $2}')
+            version=$(grep '^version:' "$folder/meta.yaml" | awk '{print $2}')
             tag="${folder}-v${version}"
 
+            # Determine changed files inside this folder
+            changed_files=$(git diff --name-only HEAD~1 HEAD | grep "^${folder}/" || true)
+
             if [ -z "$changed_files" ]; then
-              echo "No firmware files changed in $folder; skipping release."
-              continue
-            fi
-
-            # Ensure release exists (create if missing)
-            if gh release view "$tag" >/dev/null 2>&1; then
-              echo "Updating existing release for $folder (tag: $tag)"
+              files_to_upload="$folder/meta.yaml"
             else
-              echo "Creating new release for $folder (tag: $tag)"
-              gh release create "$tag" --title "$folder v${version}" \
-                --notes "Automated firmware release for $folder (v${version})." \
-                --target main
+              files_to_upload="$changed_files $folder/meta.yaml"
             fi
 
-            # Upload changed files + meta.yaml (always include meta.yaml)
-            upload_list="$changed_files $meta_path"
-            for f in $upload_list; do
+            if gh release view "$tag" >/dev/null 2>&1; then
+              echo "Release exists; updating assets."
+            else
+              echo "Creating new release for $folder ($tag)"
+              gh release create "$tag" --title "$folder v${version}" --notes "Automated release for $folder (v${version})." --target main
+            fi
+
+            echo "Uploading changed assets for $folder..."
+            for f in $files_to_upload; do
               if [ -f "$f" ]; then
-                echo "Uploading $f..."
                 gh release upload "$tag" "$f" --clobber || true
               fi
             done
 
-            # Build changelog summary for release notes
             added=$(git diff --name-status HEAD~1 HEAD | grep "^A" | grep "$folder" || true)
             modified=$(git diff --name-status HEAD~1 HEAD | grep "^M" | grep "$folder" || true)
             deleted=$(git diff --name-status HEAD~1 HEAD | grep "^D" | grep "$folder" || true)
 
-            notes="Automated firmware release for $folder (v${version}).\n\n"
-            if [ -n "$added" ]; then notes+="Added:\n${added}\n\n"; fi
-            if [ -n "$modified" ]; then notes+="Modified:\n${modified}\n\n"; fi
-            if [ -n "$deleted" ]; then notes+="Deleted:\n${deleted}\n"; fi
+            changelog="Added:\n${added}\n\nModified:\n${modified}\n\nDeleted:\n${deleted}"
+            gh release edit "$tag" --notes "Automated firmware release for $folder (v${version})." || true
+          done
 
-            gh release edit "$tag" --notes "$notes" || true
+      - name: Delete releases for removed firmware folders
+        if: steps.detect.outputs.deleted != ''
+        env:
+          DELETED: ${{ steps.detect.outputs.deleted }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for folder in $DELETED; do
+            [ -z "$folder" ] && continue
+            tags=$(gh release list --limit 1000 --json tagName --jq '.[] | .tagName' | grep "^${folder}-v" || true)
+            for tag in $tags; do
+              echo "Deleting release and tag: $tag"
+              gh release delete "$tag" --yes || true
+              git tag -d "$tag" || true
+              git push origin :refs/tags/"$tag" || true
+            done
           done
