@@ -1,21 +1,21 @@
-name: Update Meta and Create Firmware Release
+name: 🔄 Update Meta and Create Firmware Release
 
 on:
   push:
     branches:
       - main
     paths:
-      - '**/*'
+      - '**/*'  # Trigger on any file change
 
 permissions:
-  contents: write
+  contents: write  # Allow write access for commits and releases
 
 jobs:
   update-meta:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 🛠️ Checkout repository
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -32,11 +32,12 @@ jobs:
       - name: Detect changed firmware folders
         id: detect
         run: |
-          echo "Detecting firmware folders changed..."
+          echo "Detecting changed firmware folders..."
           git diff --name-only HEAD~1 HEAD > changed_files.txt
           echo "Changed files:"
           cat changed_files.txt || true
 
+          # Extract top-level folders (like ZG3.0, ZG3.1)
           awk -F'/' '{print $1}' changed_files.txt | sort | uniq > firmware_folders.txt
           echo "Changed firmware folders:"
           cat firmware_folders.txt || true
@@ -90,22 +91,36 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add */meta.yaml
-          git commit -m "🔄 Auto-update meta.yaml" || echo "No changes to commit"
+          git commit -m "Auto-update meta.yaml" || echo "No changes to commit"
           git push origin main
 
-      - name: Create or update GitHub Release
+      - name: Create or update GitHub Releases per firmware
         if: steps.detect.outputs.folders != ''
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FOLDERS: ${{ steps.detect.outputs.folders }}
         run: |
           for folder in $FOLDERS; do
+            echo "Processing firmware folder: $folder"
             version=$(grep 'version:' "$folder/meta.yaml" | awk '{print $2}')
             tag="${folder}-v${version}"
-            echo "Creating release for $folder → $tag"
-            gh release create "$tag" "$folder" \
-              --notes "Firmware release for $folder (v${version})" \
+
+            echo "Tag name: $tag"
+            echo "Creating or updating release..."
+
+            # Collect files (.bin, .mp3, meta.yaml)
+            files=$(find "$folder" -type f \( -name "*.bin" -o -name "*.mp3" -o -name "meta.yaml" \))
+
+            if [ -z "$files" ]; then
+              echo "No files found to attach for $folder"
+              continue
+            fi
+
+            # Create or update release
+            gh release create "$tag" $files \
               --title "$folder Firmware v${version}" \
-              --latest || echo "Release already exists, skipping..."
+              --notes "Automated firmware release for $folder (v${version})." \
+              --target main \
+              --latest \
+              || gh release edit "$tag" --title "$folder Firmware v${version}" --notes "Updated firmware release."
           done
