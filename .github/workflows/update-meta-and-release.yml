@@ -5,7 +5,7 @@ on:
     branches:
       - main
     paths:
-      - '**/*'  # Trigger for any file change
+      - '**/*'
 
 permissions:
   contents: write
@@ -35,35 +35,53 @@ jobs:
           echo "Detecting firmware folders changed..."
           git diff --name-only HEAD~1 HEAD > changed_files.txt
           echo "Changed files:"
-          cat changed_files.txt
+          cat changed_files.txt || true
 
-          # Extract firmware folder names
           awk -F'/' '{print $1}' changed_files.txt | sort | uniq > firmware_folders.txt
           echo "Changed firmware folders:"
-          cat firmware_folders.txt
+          cat firmware_folders.txt || true
 
           folders=$(cat firmware_folders.txt | tr '\n' ' ')
           echo "folders=$folders" >> $GITHUB_OUTPUT
 
       - name: ⚙️ Update meta.yaml files
         if: steps.detect.outputs.folders != ''
+        env:
+          FOLDERS: ${{ steps.detect.outputs.folders }}
         run: |
-          import os, yaml, datetime, subprocess
-          folders = os.environ["folders"].split()
+          import os, yaml, datetime, subprocess, sys
+
+          folders = os.environ.get("FOLDERS", "").split()
+          if not folders:
+              print("No changed firmware folders found.")
+              sys.exit(0)
+
           for folder in folders:
+              if not os.path.isdir(folder):
+                  print(f"Skipping {folder} (not a directory)")
+                  continue
+
               meta_path = f"{folder}/meta.yaml"
               data = {}
+
               if os.path.exists(meta_path):
                   with open(meta_path) as f:
                       data = yaml.safe_load(f) or {}
-              version = data.get("version", 0)
-              data["version"] = float(version) + 0.1
-              data["last_updated"] = datetime.datetime.utcnow().isoformat()
-              data["last_commit"] = subprocess.getoutput("git rev-parse HEAD")
-              data["folder"] = folder
+
+              version = float(data.get("version", 0))
+              version = round(version + 0.1, 1)
+
+              data.update({
+                  "version": version,
+                  "last_updated": datetime.datetime.utcnow().isoformat() + "Z",
+                  "last_commit": subprocess.getoutput("git rev-parse HEAD"),
+                  "folder": folder
+              })
+
               with open(meta_path, "w") as f:
                   yaml.dump(data, f)
-              print(f"✅ Updated {meta_path} → version {data['version']}")
+
+              print(f"✅ Updated {meta_path} → version {version}")
 
         shell: python
 
@@ -76,14 +94,18 @@ jobs:
           git push origin main
 
       - name: 🚀 Create or update GitHub Release
-        run: |
-          folders="${{ steps.detect.outputs.folders }}"
-          for folder in $folders; do
-            version=$(grep 'version:' "$folder/meta.yaml" | awk '{print $2}')
-            tag="${folder}-v${version}"
-            echo "Creating release for $folder → $tag"
-            gh release create "$tag" "$folder" --notes "Firmware release for $folder (v${version})" --latest
-          done
+        if: steps.detect.outputs.folders != ''
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FOLDERS: ${{ steps.detect.outputs.folders }}
+        run: |
+          for folder in $FOLDERS; do
+            version=$(grep 'version:' "$folder/meta.yaml" | awk '{print $2}')
+            tag="${folder}-v${version}"
+            echo "Creating release for $folder → $tag"
+            gh release create "$tag" "$folder" \
+              --notes "Firmware release for $folder (v${version})" \
+              --title "$folder Firmware v${version}" \
+              --latest || echo "Release already exists, skipping..."
+          done
