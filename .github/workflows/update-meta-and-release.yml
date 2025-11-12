@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -32,65 +32,65 @@ jobs:
       - name: Detect changed firmware folders and files
         id: detect
         run: |
+          echo "Detecting changed firmware folders and files..."
           git diff --name-status HEAD~1 HEAD > /tmp/changed_files.txt || true
+          cat /tmp/changed_files.txt || true
+
+          # Filter top-level firmware directories
           > /tmp/firmware_folders.txt
+          > /tmp/added_files.txt
+          > /tmp/deleted_files.txt
+
           while read status path; do
             [ -z "$path" ] && continue
             top=$(echo "$path" | cut -d'/' -f1)
+
+            # Ignore hidden/system root files
             case "$top" in
               .* | LICENSE | README* ) continue ;;
             esac
+
+            # Categorize changes
+            if [ "$status" = "D" ]; then
+              echo "$path" >> /tmp/deleted_files.txt
+            else
+              echo "$path" >> /tmp/added_files.txt
+            fi
+
+            # Track valid top-level firmware dirs
             if [ -d "$top" ]; then
               echo "$top" >> /tmp/firmware_folders.txt
+            else
+              echo "deleted:$top" >> /tmp/firmware_folders.txt
             fi
           done < /tmp/changed_files.txt
-          sort -u /tmp/firmware_folders.txt -o /tmp/firmware_folders.txt
-          folders=$(cat /tmp/firmware_folders.txt | tr '\n' ' ')
-          echo "folders=$folders" >> $GITHUB_OUTPUT
 
-      - name: Check for unauthorized meta.yaml edits
-        id: protect
+          sort -u /tmp/firmware_folders.txt -o /tmp/firmware_folders.txt
+
+          folders=$(grep -v '^deleted:' /tmp/firmware_folders.txt | tr '\n' ' ' || true)
+          deleted=$(grep '^deleted:' /tmp/firmware_folders.txt | cut -d':' -f2 | tr '\n' ' ' || true)
+          echo "folders=$folders" >> $GITHUB_OUTPUT
+          echo "deleted=$deleted" >> $GITHUB_OUTPUT
+
+      - name: Revert manual meta.yaml edits (protect metadata)
         run: |
           echo "Checking for manually edited meta.yaml files..."
-          edited_meta=$(git diff --name-only HEAD~1 HEAD | grep "meta.yaml" || true)
-          if [ -z "$edited_meta" ]; then
-            echo "no_meta_edit=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
+          git diff --name-only HEAD~1 HEAD | grep "meta.yaml" || true
 
-          unauthorized_files=()
-          for f in $edited_meta; do
-            author=$(git log -1 --pretty=format:'%an' -- "$f" || true)
-            if [ "$author" != "github-actions[bot]" ]; then
-              unauthorized_files+=("$f")
-            fi
-          done
+          edited_files=$(git diff --name-only HEAD~1 HEAD | grep "meta.yaml" || true)
 
-          if [ ${#unauthorized_files[@]} -eq 0 ]; then
-            echo "no_meta_edit=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          # Revert all unauthorized meta.yaml files
-          for f in "${unauthorized_files[@]}"; do
-            echo "Reverting unauthorized edit in $f"
-            git checkout HEAD~1 -- "$f" || true
-          done
-
-          # Determine if ONLY meta.yaml was changed (no other firmware files)
-          non_meta=$(git diff --name-only HEAD~1 HEAD | grep -v "meta.yaml" || true)
-          if [ -z "$non_meta" ]; then
-            echo "only_meta_edit=true" >> $GITHUB_OUTPUT
+          if [ -z "$edited_files" ]; then
+            echo "No manual meta.yaml edits detected."
           else
-            echo "only_meta_edit=false" >> $GITHUB_OUTPUT
+            for file in $edited_files; do
+              # Skip if this change was made by the bot
+              author=$(git log -1 --pretty=format:'%an' -- "$file" || true)
+              if [ "$author" != "github-actions[bot]" ]; then
+                echo "Reverting unauthorized edit in $file"
+                git checkout HEAD~1 -- "$file" || true
+              fi
+            done
           fi
-
-      - name: Stop pipeline if only meta.yaml was edited manually
-        if: steps.protect.outputs.only_meta_edit == 'true'
-        run: |
-          echo "Unauthorized meta.yaml edit detected. Reverted changes."
-          echo "No other firmware files changed — stopping workflow."
-          exit 0
 
       - name: Update meta.yaml files
         if: steps.detect.outputs.folders != ''
@@ -110,6 +110,7 @@ jobs:
 
               meta_path = os.path.join(folder, "meta.yaml")
               data = {}
+
               if os.path.exists(meta_path):
                   with open(meta_path) as f:
                       data = yaml.safe_load(f) or {}
@@ -117,10 +118,9 @@ jobs:
               version = float(data.get("version", 0))
               version = round(version + 0.1, 1)
 
-              now_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
               data.update({
                   "version": version,
-                  "last_updated": now_utc,
+                  "last_updated": datetime.datetime.utcnow().isoformat() + "Z",
                   "last_commit": subprocess.getoutput("git rev-parse HEAD"),
                   "folder": folder
               })
@@ -156,27 +156,54 @@ jobs:
         run: |
           for folder in $FOLDERS; do
             [ ! -d "$folder" ] && continue
+
             version=$(grep '^version:' "$folder/meta.yaml" | awk '{print $2}')
             tag="${folder}-v${version}"
 
-            changed=$(git diff --name-only HEAD~1 HEAD | grep "^${folder}/" | grep -v "meta.yaml" || true)
-            if [ -z "$changed" ]; then
-              echo "No non-meta changes for $folder; skipping release."
-              continue
+            # Determine changed files inside this folder
+            changed_files=$(git diff --name-only HEAD~1 HEAD | grep "^${folder}/" || true)
+
+            if [ -z "$changed_files" ]; then
+              files_to_upload="$folder/meta.yaml"
+            else
+              files_to_upload="$changed_files $folder/meta.yaml"
             fi
 
             if gh release view "$tag" >/dev/null 2>&1; then
               echo "Release exists; updating assets."
             else
-              gh release create "$tag" --title "$folder v${version}" \
-                --notes "Automated firmware release for $folder (v${version})." \
-                --target main
+              echo "Creating new release for $folder ($tag)"
+              gh release create "$tag" --title "$folder v${version}" --notes "Automated release for $folder (v${version})." --target main
             fi
 
-            files_to_upload="$changed $folder/meta.yaml"
+            echo "Uploading changed assets for $folder..."
             for f in $files_to_upload; do
               if [ -f "$f" ]; then
                 gh release upload "$tag" "$f" --clobber || true
               fi
+            done
+
+            added=$(git diff --name-status HEAD~1 HEAD | grep "^A" | grep "$folder" || true)
+            modified=$(git diff --name-status HEAD~1 HEAD | grep "^M" | grep "$folder" || true)
+            deleted=$(git diff --name-status HEAD~1 HEAD | grep "^D" | grep "$folder" || true)
+
+            changelog="Added:\n${added}\n\nModified:\n${modified}\n\nDeleted:\n${deleted}"
+            gh release edit "$tag" --notes "Automated firmware release for $folder (v${version})." || true
+          done
+
+      - name: Delete releases for removed firmware folders
+        if: steps.detect.outputs.deleted != ''
+        env:
+          DELETED: ${{ steps.detect.outputs.deleted }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for folder in $DELETED; do
+            [ -z "$folder" ] && continue
+            tags=$(gh release list --limit 1000 --json tagName --jq '.[] | .tagName' | grep "^${folder}-v" || true)
+            for tag in $tags; do
+              echo "Deleting release and tag: $tag"
+              gh release delete "$tag" --yes || true
+              git tag -d "$tag" || true
+              git push origin :refs/tags/"$tag" || true
             done
           done
