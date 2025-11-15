@@ -208,12 +208,12 @@ jobs:
           git push origin main || true
           exit 0
 
-      - name: Update meta.yaml files
+      - name: Update meta.yaml files and create zip archives
         if: steps.detect.outputs.folders != '' && steps.protect.outputs.only_meta_edit != 'true'
         env:
           FOLDERS: ${{ steps.detect.outputs.folders }}
         run: |
-          import os, yaml, datetime, subprocess, sys
+          import os, yaml, datetime, subprocess, sys, zipfile
 
           folders = os.environ.get("FOLDERS", "").split()
           if not folders or folders == ['']:
@@ -238,17 +238,44 @@ jobs:
                   version = round(current_version + 0.1, 1)
 
               now_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+              # Create zip file name
+              zip_filename = f"{folder}.zip"
+              zip_path = os.path.join(folder, zip_filename)
+
+              # Remove old zip file if it exists
+              if os.path.exists(zip_path):
+                  os.remove(zip_path)
+
+              # Create new zip file containing all files in the folder except the zip itself
+              print(f"Creating zip archive: {zip_path}")
+              with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                  for root, dirs, files in os.walk(folder):
+                      # Skip git directories
+                      dirs[:] = [d for d in dirs if not d.startswith('.git')]
+
+                      for file in files:
+                          # Skip the zip file itself and git-related files
+                          if file == zip_filename or file.startswith('.git'):
+                              continue
+
+                          file_path = os.path.join(root, file)
+                          arcname = os.path.relpath(file_path, folder)
+                          zipf.write(file_path, arcname)
+
               data.update({
                   "version": version,
                   "last_updated": now_utc,
                   "last_commit": subprocess.getoutput("git rev-parse HEAD"),
-                  "folder": folder
+                  "folder": folder,
+                  "zip_file": zip_filename
               })
 
               with open(meta_path, "w") as f:
                   yaml.dump(data, f)
 
               print(f"Updated {meta_path} -> version {version}")
+              print(f"Created {zip_path}")
 
         shell: python
 
@@ -289,19 +316,6 @@ jobs:
             tag="${folder}"
 
             echo "Processing $folder with version $version"
-            
-            # Create source code archives
-            archive_base="${folder}-v${version}"
-            zip_file="${archive_base}.zip"
-            tar_file="${archive_base}.tar.gz"
-
-            echo "Creating source code archives for $folder..."
-
-            # Create zip archive
-            zip -r "$zip_file" "$folder" -x "*.git*" || true
-
-            # Create tar.gz archive
-            tar -czf "$tar_file" --exclude=".git*" "$folder" || true
 
             # Determine changed files inside this folder
             changed_files=$(git diff --name-only HEAD~1 HEAD | grep "^${folder}/" || true)
@@ -312,6 +326,12 @@ jobs:
               files_to_upload="$changed_files $folder/meta.yaml"
             fi
 
+            # Check if zip file exists in the folder
+            folder_zip="$folder/${folder}.zip"
+            if [ -f "$folder_zip" ]; then
+              files_to_upload="$files_to_upload $folder_zip"
+            fi
+
             if gh release view "$tag" >/dev/null 2>&1; then
               echo "Release exists; updating assets."
             else
@@ -319,19 +339,12 @@ jobs:
               gh release create "$tag" --title "$folder" --notes "Automated release for $folder (v${version})." --target main
             fi
 
-            echo "Uploading source code archives for $folder..."
-            gh release upload "$tag" "$zip_file" --clobber || true
-            gh release upload "$tag" "$tar_file" --clobber || true
-
-            echo "Uploading changed assets for $folder..."
+            echo "Uploading assets for $folder..."
             for f in $files_to_upload; do
               if [ -f "$f" ]; then
                 gh release upload "$tag" "$f" --clobber || true
               fi
             done
-
-            # Clean up archive files
-            rm -f "$zip_file" "$tar_file"
 
             added=$(git diff --name-status HEAD~1 HEAD | grep "^A" | grep "$folder" || true)
             modified=$(git diff --name-status HEAD~1 HEAD | grep "^M" | grep "$folder" || true)
