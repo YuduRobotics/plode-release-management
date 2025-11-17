@@ -311,7 +311,7 @@ jobs:
                       blob = bucket.blob(gcs_blob_path)
                       if blob.exists():
                           blob.delete()
-                          print(f"Deleted old zip from GCS: gs://{gcs_bucket_name}/{gcs_blob_path}")
+                          print(f"Deleted old zip from GCS: https://storage.googleapis.com/{gcs_bucket_name}/{gcs_blob_path}")
                   except Exception as e:
                       print(f"Warning: Failed to delete old GCS file: {e}")
 
@@ -338,7 +338,7 @@ jobs:
                       gcs_blob_path = f"{gcs_folder_path}/{folder}/{zip_filename}"
                       blob = bucket.blob(gcs_blob_path)
                       blob.upload_from_filename(zip_path)
-                      gcs_url = f"gs://{gcs_bucket_name}/{gcs_blob_path}"
+                      gcs_url = f"https://storage.googleapis.com/{gcs_bucket_name}/{gcs_blob_path}"
                       print(f"Uploaded to GCS: {gcs_url}")
                   except Exception as e:
                       print(f"Warning: Failed to upload to GCS: {e}")
