@@ -1,5 +1,6 @@
 folder: ZG2.0
-last_commit: e4848ab101239f758b69d600151faa57be07cad2
-last_updated: '2025-11-15T05:33:47.542133+00:00'
-version: 1.2
+gcs_url: gs://plode_resource/sdcard-assets/ZG2.0/ZG2.0.zip
+last_commit: e367ad533021bd42a2646f9aee115c4e3875e186
+last_updated: '2025-11-17T05:55:45.411672+00:00'
+version: 1.3
 zip_file: ZG2.0.zip
