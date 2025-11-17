@@ -1,5 +1,6 @@
 folder: ZG3.0
-last_commit: 6a10259348cf55c020af887ff41a64d19eb67b10
-last_updated: '2025-11-15T03:57:27.198380+00:00'
-version: 1.1
+gcs_url: https://storage.googleapis.com/plode_resource/sdcard-assets/ZG3.0/ZG3.0.zip
+last_commit: 8dadce37df2346fc07995e3947cdb0cec5449ef3
+last_updated: '2025-11-17T07:33:24.479771+00:00'
+version: 1.2
 zip_file: ZG3.0.zip
