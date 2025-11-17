@@ -27,7 +27,43 @@ jobs:
           python-version: "3.x"
 
       - name: Install dependencies
-        run: pip install pyyaml
+        run: pip install pyyaml google-cloud-storage
+
+      - name: Setup Google Cloud credentials from individual keys
+        env:
+          STORAGE_PRIVATE_KEY: ${{ secrets.STORAGE_PRIVATE_KEY }}
+          STORAGE_PROJECT_ID: ${{ secrets.STORAGE_PROJECT_ID }}
+          STORAGE_CLIENT_EMAIL: ${{ secrets.STORAGE_CLIENT_EMAIL }}
+        run: |
+          # Only create credentials if STORAGE_PRIVATE_KEY is set
+          if [ -n "$STORAGE_PRIVATE_KEY" ]; then
+            cat > /tmp/gcs-key.json <<EOF
+          {
+            "type": "service_account",
+            "project_id": "$STORAGE_PROJECT_ID",
+            "private_key": "$STORAGE_PRIVATE_KEY",
+            "client_email": "$STORAGE_CLIENT_EMAIL",
+            "token_uri": "https://oauth2.googleapis.com/token"
+          }
+          EOF
+            echo "GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcs-key.json" >> $GITHUB_ENV
+            echo "GCS credentials configured from individual keys"
+          else
+            echo "STORAGE_PRIVATE_KEY not set, skipping individual key setup"
+          fi
+
+      - name: Authenticate to Google Cloud (JSON key)
+        env:
+          GCP_CREDS: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+        run: |
+          # Only authenticate if JSON key is provided and individual keys weren't already set
+          if [ -n "$GCP_CREDS" ] && [ ! -f "/tmp/gcs-key.json" ]; then
+            echo "$GCP_CREDS" > /tmp/gcp-key.json
+            echo "GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcp-key.json" >> $GITHUB_ENV
+            echo "GCS credentials configured from complete JSON key"
+          else
+            echo "Using individual credentials or GCP_SERVICE_ACCOUNT_KEY not set"
+          fi
 
       - name: Check for unauthorized firmware folder deletions
         id: protect_deletion
@@ -212,12 +248,34 @@ jobs:
         if: steps.detect.outputs.folders != '' && steps.protect.outputs.only_meta_edit != 'true'
         env:
           FOLDERS: ${{ steps.detect.outputs.folders }}
+          GCS_BUCKET_NAME: ${{ vars.GCS_BUCKET_NAME }}
+          GCS_FOLDER_PATH: ${{ vars.GCS_FOLDER_PATH }}
+          STORAGE_MEDIA_BUCKET: ${{ secrets.STORAGE_MEDIA_BUCKET }}
         run: |
           import os, yaml, datetime, subprocess, sys, zipfile
 
           folders = os.environ.get("FOLDERS", "").split()
           if not folders or folders == ['']:
               sys.exit(0)
+
+          # Google Cloud Storage setup
+          # Support both GCS_BUCKET_NAME (variable) or STORAGE_MEDIA_BUCKET (secret)
+          gcs_bucket_name = os.environ.get("GCS_BUCKET_NAME", "") or os.environ.get("STORAGE_MEDIA_BUCKET", "")
+          gcs_folder_path = os.environ.get("GCS_FOLDER_PATH", "firmware")
+          gcs_enabled = bool(gcs_bucket_name)
+
+          storage_client = None
+          bucket = None
+
+          if gcs_enabled:
+              try:
+                  from google.cloud import storage
+                  storage_client = storage.Client()
+                  bucket = storage_client.bucket(gcs_bucket_name)
+                  print(f"Google Cloud Storage enabled: {gcs_bucket_name}/{gcs_folder_path}")
+              except Exception as e:
+                  print(f"Warning: GCS setup failed: {e}")
+                  gcs_enabled = False
 
           for folder in folders:
               if not os.path.isdir(folder):
@@ -243,9 +301,19 @@ jobs:
               zip_filename = f"{folder}.zip"
               zip_path = os.path.join(folder, zip_filename)
 
-              # Remove old zip file if it exists
+              # Remove old zip file if it exists (local and GCS)
               if os.path.exists(zip_path):
                   os.remove(zip_path)
+
+              if gcs_enabled and bucket:
+                  try:
+                      gcs_blob_path = f"{gcs_folder_path}/{folder}/{zip_filename}"
+                      blob = bucket.blob(gcs_blob_path)
+                      if blob.exists():
+                          blob.delete()
+                          print(f"Deleted old zip from GCS: gs://{gcs_bucket_name}/{gcs_blob_path}")
+                  except Exception as e:
+                      print(f"Warning: Failed to delete old GCS file: {e}")
 
               # Create new zip file containing all files in the folder except the zip itself
               print(f"Creating zip archive: {zip_path}")
@@ -263,6 +331,19 @@ jobs:
                           arcname = os.path.relpath(file_path, folder)
                           zipf.write(file_path, arcname)
 
+              # Upload to Google Cloud Storage
+              gcs_url = ""
+              if gcs_enabled and bucket:
+                  try:
+                      gcs_blob_path = f"{gcs_folder_path}/{folder}/{zip_filename}"
+                      blob = bucket.blob(gcs_blob_path)
+                      blob.upload_from_filename(zip_path)
+                      gcs_url = f"gs://{gcs_bucket_name}/{gcs_blob_path}"
+                      print(f"Uploaded to GCS: {gcs_url}")
+                  except Exception as e:
+                      print(f"Warning: Failed to upload to GCS: {e}")
+
+              # Update meta.yaml
               data.update({
                   "version": version,
                   "last_updated": now_utc,
@@ -270,6 +351,9 @@ jobs:
                   "folder": folder,
                   "zip_file": zip_filename
               })
+
+              if gcs_url:
+                  data["gcs_url"] = gcs_url
 
               with open(meta_path, "w") as f:
                   yaml.dump(data, f)
@@ -316,19 +400,6 @@ jobs:
             tag="${folder}"
 
             echo "Processing $folder with version $version"
-            
-            # Create source code archives
-            archive_base="${folder}-v${version}"
-            zip_file="${archive_base}.zip"
-            tar_file="${archive_base}.tar.gz"
-
-            echo "Creating source code archives for $folder..."
-
-            # Create zip archive
-            zip -r "$zip_file" "$folder" -x "*.git*" || true
-
-            # Create tar.gz archive
-            tar -czf "$tar_file" --exclude=".git*" "$folder" || true
 
             # Determine changed files inside this folder
             changed_files=$(git diff --name-only HEAD~1 HEAD | grep "^${folder}/" || true)
@@ -339,6 +410,12 @@ jobs:
               files_to_upload="$changed_files $folder/meta.yaml"
             fi
 
+            # Check if zip file exists in the folder
+            folder_zip="$folder/${folder}.zip"
+            if [ -f "$folder_zip" ]; then
+              files_to_upload="$files_to_upload $folder_zip"
+            fi
+
             if gh release view "$tag" >/dev/null 2>&1; then
               echo "Release exists; updating assets."
             else
@@ -346,19 +423,12 @@ jobs:
               gh release create "$tag" --title "$folder" --notes "Automated release for $folder (v${version})." --target main
             fi
 
-            echo "Uploading source code archives for $folder..."
-            gh release upload "$tag" "$zip_file" --clobber || true
-            gh release upload "$tag" "$tar_file" --clobber || true
-
-            echo "Uploading changed assets for $folder..."
+            echo "Uploading assets for $folder..."
             for f in $files_to_upload; do
               if [ -f "$f" ]; then
                 gh release upload "$tag" "$f" --clobber || true
               fi
             done
-
-            # Clean up archive files
-            rm -f "$zip_file" "$tar_file"
 
             added=$(git diff --name-status HEAD~1 HEAD | grep "^A" | grep "$folder" || true)
             modified=$(git diff --name-status HEAD~1 HEAD | grep "^M" | grep "$folder" || true)
